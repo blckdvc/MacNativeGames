@@ -94,7 +94,8 @@ def preflight(args, py):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--game", type=Path, required=True, help="your Odyssey XCI or NSP holding the base game and update 1.3.0 or 1.4.1")
-    p.add_argument("--update", type=Path, help="the update NSP, when --game is the base NSP alone: both are joined into "
+    p.add_argument("--update", type=Path, help="the update NSP, when --game is the base NSP alone, or a card image whose "
+                   "built-in update it replaces: both are joined into "
                    "<work>/input/odyssey.nsp first (scripts/merge_nsp.py)")
     p.add_argument("--keys", type=Path, required=True, help="prod.keys dumped from your own Switch")
     p.add_argument("--work", type=Path, default=GAME_DIR / "Odyssey_build", help="build folder (default Odyssey_build)")
@@ -114,7 +115,7 @@ def main():
         merged = args.work / "input/odyssey.nsp"
         if not merged.is_file() or merged.stat().st_mtime < max(args.game.stat().st_mtime, args.update.stat().st_mtime):
             t = step(0, "Join the base and update NSPs")
-            run([py, "scripts/merge_nsp.py", args.game, args.update.resolve(), "--output", merged])
+            run([py, "scripts/merge_nsp.py", args.game, args.update.resolve(), "--output", merged, "--keys", args.keys])
             done(t)
         args.game = merged
     preflight(args, py)
