@@ -23,9 +23,10 @@ All measurements on 26 October 2026: MacBook Pro, Apple M1 Max, 64 GB, macOS 27.
 (PFS0)"). It now reads an XCI's secure partition too (`container_entries`, as the later steps do). A card image can
 carry the update it shipped with (seen: a card with 1.3.0, joined with the 1.4.1 update NSP), and the two updates then
 collided on the ticket and certificate of the same rights ID. With `--keys`, which `build_odyssey.py` now passes, the
-base file's built-in update is left out so the update NSP replaces it: the NCAs whose header names an update title ID or
-an update rights ID, and that rights ID's ticket and certificate. Only NCA headers are read for this; without `--keys`
-the join is as before. `tests/test_merge_nsp.py` covers both with synthetic containers.
+base file's built-in update is left out so the update NSP replaces it: its Meta NCA, the NCAs that one's content list
+(.cnmt) names, any NCA under an update rights ID, and that rights ID's ticket and certificate. The content list is
+needed because a card's update Control NCA carries the base title's ID and no rights ID: left in, step 8 found three
+Control NCAs ("Expected base and update Control NCAs"). Without `--keys` the join is as before. `tests/test_merge_nsp.py` covers both with synthetic containers.
 
 ### 2026-11-08: Luncheon Kingdom: no poison on clean sand in the Spewart fight (#1901)
 

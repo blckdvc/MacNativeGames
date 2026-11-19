@@ -3,7 +3,8 @@
 the build reads. Of an XCI, the entries of its secure partition are taken.
 
 A card image can carry the update it shipped with. With --keys, that built-in update (its NCAs, ticket and certificate)
-is left out of the base, so the separate update NSP replaces it; only NCA headers are read for this.
+is left out of the base, so the separate update NSP replaces it; for this only NCA headers and the built-in update's
+content list (the .cnmt in its Meta NCA) are read.
 
     python3 scripts/merge_nsp.py BASE.nsp UPDATE.nsp --output Odyssey_build/input/odyssey.nsp
 
@@ -13,12 +14,14 @@ bytes. Nothing is decrypted, and no keys are needed. The output is written next 
 
 import argparse
 import hashlib
+import io
 import struct
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "third_party" / "totk-scripts"))
-from extract_exefs import container_entries, load_keys, partition_entries, read_nca_header, require  # noqa: E402
+from extract_exefs import (container_entries, decrypt, load_keys, nca_ctr_key, partition_entries, read_at,  # noqa: E402
+                           read_nca_header, require)
 
 CHUNK = 8 << 20
 
@@ -38,16 +41,56 @@ def is_update_id(title_id):
     return title_id & 0xFFF == 0x800
 
 
+def meta_contents(f, start, hdr, keys):
+    """The NCA file names an update's Meta NCA lists: its verified PFS0 section holds one .cnmt with a content table."""
+    from cryptography.hazmat.primitives.ciphers import modes
+    key = nca_ctr_key(hdr, keys, {})
+    for i in range(4):
+        first, last = struct.unpack_from("<II", hdr, 0x240 + 16 * i)
+        fs = hdr[0x400 + 512 * i:0x600 + 512 * i]
+        if not first or fs[2:5] != b"\x01\x02\x03":   # a PFS0 with hierarchical SHA-256, AES-CTR
+            continue
+        require(hashlib.sha256(fs).digest() == hdr[0x280 + 32 * i:0x2A0 + 32 * i], "Meta NCA: FS header hash mismatch")
+        block, levels = struct.unpack_from("<II", fs, 0x28)
+        hash_at, hash_size, pfs_at, pfs_size = struct.unpack_from("<QQQQ", fs, 0x30)
+        require(levels == 2 and block > 0 and pfs_size <= 16 << 20, "Meta NCA: unsupported hash layout")
+
+        def section(relative, size):
+            require(0 <= relative and relative + size <= (last - first) * 512, "Meta NCA: read out of bounds")
+            absolute = first * 512 + relative
+            aligned = absolute & ~15
+            iv = fs[0x140:0x148][::-1] + (aligned // 16).to_bytes(8, "big")
+            return decrypt(key, modes.CTR(iv), read_at(f, start + aligned, size + absolute - aligned))[absolute - aligned:]
+
+        hashes = section(hash_at, hash_size)
+        require(hashlib.sha256(hashes).digest() == fs[8:40], "Meta NCA: hash table mismatch (check prod.keys)")
+        pfs = section(pfs_at, pfs_size)
+        for n, at in enumerate(range(0, pfs_size, block)):
+            require(hashlib.sha256(pfs[at:at + block]).digest() == hashes[n * 32:(n + 1) * 32], "Meta NCA: block hash mismatch")
+        cnmt = [pfs[at:at + size] for name, at, size in partition_entries(io.BytesIO(pfs), 0, len(pfs))
+                if name.lower().endswith(".cnmt")]
+        require(len(cnmt) == 1 and len(cnmt[0]) >= 0x20, "Meta NCA: expected one .cnmt")
+        extended, count = struct.unpack_from("<HH", cnmt[0], 0x0E)
+        table = 0x20 + extended
+        require(table + count * 0x38 <= len(cnmt[0]), "Meta NCA: content table out of bounds")
+        return {cnmt[0][table + n * 0x38 + 0x20:table + n * 0x38 + 0x30].hex() + ".nca" for n in range(count)}
+    raise ValueError("Meta NCA: no content list found")
+
+
 def builtin_update(f, found, keys):
-    """Names of the base file's entries that belong to an update title (ID ending in 800)."""
-    names = set()
+    """Names of the base file's entries that belong to an update title (ID ending in 800): its Meta NCA, the NCAs that
+    one lists (on a card they can carry the base title's ID and no rights ID), and anything under an update rights ID."""
+    names, listed = set(), set()
     for name, start, length in found:
         lower = name.lower()
         if lower.endswith(".nca"):
             hdr = read_nca_header(f, start, length, keys)
             rights = hdr[0x230:0x240]
-            if is_update_id(struct.unpack_from("<Q", hdr, 0x210)[0]) or \
-                    (rights != bytes(16) and is_update_id(int.from_bytes(rights[:8], "big"))):
+            if is_update_id(struct.unpack_from("<Q", hdr, 0x210)[0]):
+                names.add(name)
+                if hdr[0x205] == 1:   # content type 1: Meta
+                    listed |= meta_contents(f, start, hdr, keys)
+            elif rights != bytes(16) and is_update_id(int.from_bytes(rights[:8], "big")):
                 names.add(name)
         elif lower.endswith((".tik", ".cert")):
             try:
@@ -55,6 +98,7 @@ def builtin_update(f, found, keys):
                     names.add(name)
             except ValueError:
                 pass
+    names |= {name for name, _, _ in found if name.lower() in listed}
     return names
 
 
